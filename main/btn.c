@@ -14,8 +14,9 @@ static const char *TAG = "BUTTON";
 #define BOOT_BUTTON_GPIO GPIO_NUM_28   // Boot 按键
 
 // -- 私有全局变量 --
-static bool led_on = true;
+static bool led_state = true;
 static TimerHandle_t debounce_timer; // 用于防抖的软件定时器
+static led_state_change_callback_t on_state_change_cb = NULL; // 状态变化回调函数指针
 
 // -- 私有函数 --
 
@@ -27,13 +28,18 @@ static TimerHandle_t debounce_timer; // 用于防抖的软件定时器
 static void debounce_timer_callback(TimerHandle_t xTimer)
 {
     // 定时器成功触发，说明按键已经稳定
-    led_on = !led_on;
-    ESP_LOGI(TAG, "Button press stable! New LED state: %s", led_on ? "ON" : "OFF");
+    led_state = !led_state;
+    ESP_LOGI(TAG, "Button press stable! New LED state: %s", led_state ? "ON" : "OFF");
 
-    if (led_on) {
+    if (led_state) {
         led_set_random_color();
     } else {
         led_turn_off();
+    }
+
+    // 如果注册了回调函数，则调用它来上报新状态
+    if (on_state_change_cb) {
+        on_state_change_cb(led_state);
     }
 }
 
@@ -50,8 +56,10 @@ static void IRAM_ATTR button_isr_handler(void *arg)
 
 // -- 公开函数 --
 
-void button_init(void)
+void button_init(led_state_change_callback_t cb)
 {
+    on_state_change_cb = cb; // 保存回调函数指针
+
     // 创建一个 50ms 的单次软件定时器用于防抖
     debounce_timer = xTimerCreate(
         "DebounceTimer",

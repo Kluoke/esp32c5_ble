@@ -39,7 +39,8 @@ void app_main(void)
     // 1. 初始化底层驱动和 NVS
     nvs_flash_init();
     led_init();
-    button_init();
+    // 初始化按键，并传入蓝牙上报函数作为回调
+    button_init(ble_notify_led_state);
 
     // 2. 创建跨模块通信机制（消息队列）
     led_cmd_queue = xQueueCreate(LED_CMD_QUEUE_LENGTH, sizeof(uint8_t));

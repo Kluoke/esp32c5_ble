@@ -15,6 +15,7 @@
 
 static QueueHandle_t led_cmd_queue; // 用于传递 LED 命令的消息队列
 
+static uint16_t g_conn_handle = BLE_HS_CONN_HANDLE_NONE; // 全局连接句柄
 static bool ble_adv_active = false;
 static uint16_t rx_value_handle;
 static uint16_t tx_value_handle;
@@ -47,23 +48,29 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
     return 0; // 返回成功
 }
 int gap_event_handler(struct ble_gap_event *event, void *arg){
-    if(event->type == BLE_GAP_EVENT_CONNECT){
-        if(event->connect.status == 0){
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
             ble_adv_active = false; // 连接成功，停止广播
+            g_conn_handle = event->connect.conn_handle; // 保存连接句柄
             ESP_LOGI(TAG, "连接成功，连接句柄: %d", event->connect.conn_handle);
-        }
-        else{
-            if(!ble_adv_active){
-                ESP_LOGE(TAG, "重新开始广播");
+        } else {
+            if (!ble_adv_active) {
+                ESP_LOGE(TAG, "连接失败，重新开始广播");
                 start_advertising(); // 重新开始广播
             }
         }
-    }else if(event->type == BLE_GAP_EVENT_DISCONNECT){
-            ESP_LOGE(TAG, "连接失败，错误码: %d", event->connect.status);
-            if(!ble_adv_active){
-                ESP_LOGE(TAG, "重新开始广播");
-                start_advertising(); // 重新开始广播
-            }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "连接断开，原因: %d", event->disconnect.reason);
+        g_conn_handle = BLE_HS_CONN_HANDLE_NONE; // 清除连接句柄
+        if (!ble_adv_active) {
+            ESP_LOGI(TAG, "重新开始广播");
+            start_advertising(); // 重新开始广播
+        }
+        break;
+    default:
+        break;
     }
     return 0;
 }
@@ -154,4 +161,33 @@ void ble_init(QueueHandle_t cmd_queue)
     ble_hs_cfg.sync_cb = ble_on_sync;
 
     nimble_port_freertos_init(host_task);
+}
+
+void ble_notify_led_state(uint8_t state)
+{
+    if (g_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "无法发送通知：蓝牙未连接");
+        return;
+    }
+
+    char *response = NULL;
+
+    if(state == 0){
+        response = "LED is OFF";
+    }else if (state == 1){
+        response = "LED is ON";
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(response, strlen(response));
+    if (!om) {
+        ESP_LOGE(TAG, "无法为通知分配 mbuf");
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(g_conn_handle, tx_value_handle, om);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "发送通知失败; rc=%d", rc);
+    } else {
+        ESP_LOGI(TAG, "成功发送LED状态通知: 0x%02X", state);
+    }
 }

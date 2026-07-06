@@ -6,12 +6,19 @@
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "led.h" // 引入 led 控制头文件
 
 #define TAG "BLE_MODULE"
 #define DEVICE_NAME "ESP32_BLE_DEVICE"
+
+static QueueHandle_t led_cmd_queue; // 用于传递 LED 命令的消息队列
+
 static bool ble_adv_active = false;
 static uint16_t rx_value_handle;
 static uint16_t tx_value_handle;
+void start_advertising(void);
 static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
                                struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -19,17 +26,15 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
         // 处理写入操作
         if(attr_handle == rx_value_handle){
             struct os_mbuf *om = ctxt->om;
-            if(om->om_data[0] == 0x01){
-                led_set_random_color();
+            if (OS_MBUF_PKTLEN(om) > 0) {
+                // 将接收到的第一个字节作为命令发送到队列
+                uint8_t cmd = om->om_data[0];
+                if (xQueueSend(led_cmd_queue, &cmd, 0) != pdPASS) {
+                    ESP_LOGE(TAG, "Failed to send to led_cmd_queue");
+                }
             }
-            else if(om->om_data[0] == 0x00){
-                led_turn_off();
-            }
-            // 这里可以处理接收到的数据，例如存储或触发其他操作
-            // ESP_LOGI(TAG, "Received data: %.*s", OS_MBUF_PKTLEN(om), (char *)OS_MBUF_DATA(om));
         }
         ESP_LOGI(TAG, "Received write to handle %d", attr_handle);
-        // 这里可以处理接收到的数据，例如存储或触发其他操作
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         // 处理读取操作
         if(attr_handle == tx_value_handle){
@@ -38,7 +43,6 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
             os_mbuf_append(ctxt->om, response, strlen(response));
         }
         ESP_LOGI(TAG, "Received read from handle %d", attr_handle);
-        // 这里可以返回数据给客户端
     }
     return 0; // 返回成功
 }
@@ -132,8 +136,10 @@ static void ble_on_sync(void)
 void host_task( void * arg){
     nimble_port_run(); // This function will return only when nimble_port_stop() is executed
 }
-void ble_init(void)
+void ble_init(QueueHandle_t cmd_queue)
 {
+    led_cmd_queue = cmd_queue; // 保存从外部传入的队列句柄
+
     // Initialize the NimBLE host stack
     nimble_port_init();
     ble_svc_gap_init();

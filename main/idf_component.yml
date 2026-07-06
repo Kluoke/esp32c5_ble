@@ -1,0 +1,6 @@
+dependencies:
+  espressif/led_strip: "^3.0.3"
+
+  # espressif/nvs_flash:
+  #   version: "^1.0.0"  # 你可以指定一个版本范围，例如 "^1.0.0"
+  #   require: public    # 使依赖关系对其它组件可见，效果等同于 CMakeLists.txt 中的 REQUIRES

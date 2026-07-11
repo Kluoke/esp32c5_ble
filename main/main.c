@@ -7,6 +7,7 @@
 #include "led.h"
 #include "btn.h"
 #include "ble.h"
+#include "wifi.h"
 
 static const char *TAG = "MAIN_APP";
 
@@ -49,6 +50,7 @@ void app_main(void)
     }
 
     // 3. 初始化需要通信机制的模块
+    wifi_init(); // 初始化 Wi-Fi 模块
     ble_init(led_cmd_queue); // 初始化 NimBLE，并传入队列句柄
 
     // 4. 创建并启动应用逻辑任务

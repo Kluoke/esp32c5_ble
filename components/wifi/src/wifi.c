@@ -113,9 +113,6 @@ void wifi_init(void)
     esp_wifi_init(&config);
     esp_wifi_set_mode(WIFI_MODE_STA);
 
-    wifi_config_t empty_config = {0};
-    esp_wifi_set_config(ESP_IF_WIFI_STA, &empty_config);
-
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
     if (err == ESP_OK) {

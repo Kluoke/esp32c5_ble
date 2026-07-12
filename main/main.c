@@ -9,6 +9,7 @@
 #include "ble.h"
 #include "wifi.h"
 #include "ntp.h"
+#include "mqtt.h"
 #include <time.h>
 
 static const char *TAG = "MAIN_APP";
@@ -32,6 +33,7 @@ static void led_control_task(void *pvParameters)
                 led_set_random_color();
             } else if (cmd == 0x00) {
                 led_turn_off();
+                send_message();
             }
         }
     }
@@ -57,6 +59,7 @@ void app_main(void)
     wifi_init(); // 初始化 Wi-Fi 模块
     ble_init(led_cmd_queue); // 初始化 NimBLE，并传入队列句柄
     ntp_init(); // 初始化 NTP 模块
+    mqtt_app_init(); // 初始化 MQTT 模块
 
     // 4. 创建并启动应用逻辑任务
     xTaskCreate(led_control_task, "led_control_task", 2048, NULL, 5, NULL);

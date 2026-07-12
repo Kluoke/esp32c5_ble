@@ -10,6 +10,7 @@
 #include "freertos/queue.h"
 #include "led.h"
 #include "wifi.h"
+#include "mqtt.h"
 #include <string.h>
 
 #define TAG "BLE_MODULE"
@@ -18,14 +19,15 @@
 static QueueHandle_t led_cmd_queue;
 
 static uint16_t g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static bool ble_adv_active = false;
 static uint16_t rx_value_handle;
 static uint16_t tx_value_handle;
 static uint16_t wifi_ssid_value_handle;
 static uint16_t wifi_pwd_value_handle;
+static uint16_t mqtt_broker_value_handle;
 
 static char wifi_ssid_buf[33] = {0};
 static char wifi_pwd_buf[65] = {0};
+static char mqtt_broker_buf[129] = {0};
 
 void start_advertising(void);
 
@@ -61,6 +63,16 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
                 wifi_save_credentials_and_connect(wifi_ssid_buf, wifi_pwd_buf);
             }
         }
+        else if(attr_handle == mqtt_broker_value_handle){
+            struct os_mbuf *om = ctxt->om;
+            uint16_t len = OS_MBUF_PKTLEN(om);
+            if (len > 0 && len < sizeof(mqtt_broker_buf)) {
+                os_mbuf_copydata(om, 0, len, mqtt_broker_buf);
+                mqtt_broker_buf[len] = '\0';
+                ESP_LOGI(TAG, "收到 MQTT 服务器地址: %s，开始连接", mqtt_broker_buf);
+                mqtt_app_save_broker_and_connect(mqtt_broker_buf);
+            }
+        }
         ESP_LOGI(TAG, "Received write to handle %d", attr_handle);
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         if(attr_handle == tx_value_handle){
@@ -75,23 +87,17 @@ int gap_event_handler(struct ble_gap_event *event, void *arg){
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            ble_adv_active = false;
             g_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "连接成功，连接句柄: %d", event->connect.conn_handle);
         } else {
-            if (!ble_adv_active) {
-                ESP_LOGE(TAG, "连接失败，重新开始广播");
-                start_advertising();
-            }
+            ESP_LOGE(TAG, "连接失败，重新开始广播");
+            start_advertising();
         }
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "连接断开，原因: %d", event->disconnect.reason);
         g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        if (!ble_adv_active) {
-            ESP_LOGI(TAG, "重新开始广播");
-            start_advertising();
-        }
+        start_advertising();
         break;
     default:
         break;
@@ -133,6 +139,13 @@ struct ble_gatt_svc_def gatt_svcs[] = {
                 .arg = NULL,
             },
             {
+                .uuid = BLE_UUID16_DECLARE(0xFF05),
+                .access_cb = gatt_event_handeler,
+                .flags = BLE_GATT_CHR_F_WRITE,
+                .val_handle = &mqtt_broker_value_handle,
+                .arg = NULL,
+            },
+            {
                 0,
             }
         },
@@ -166,10 +179,8 @@ void start_advertising(void){
     if (rc != 0) {
         ESP_LOGE(TAG, "Error starting advertisement; rc=%d", rc);
         return;
-    }else{
-        ESP_LOGI(TAG, "广播已启动等待连接");
-        ble_adv_active = true;
     }
+    ESP_LOGI(TAG, "广播已启动等待连接");
 }
 static void ble_on_sync(void)
 {

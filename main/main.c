@@ -64,14 +64,13 @@ void app_main(void)
     // 5. 设置初始状态并打印日志
     led_set_random_color(); // 启动时设置一个随机颜色
     ESP_LOGI(TAG, "All components initialized. Application running.");
-    ESP_LOGI(TAG, "Press BOOT button to toggle LED");
+    ESP_LOGI(TAG, "Press BOOT button to toggle LED"); now = time(NULL);
+    localtime_r(&now, &timeinfo);
+    // timeinfo = localtime(&now);
+    ESP_LOGI(TAG, "Current time: %s", asctime(&timeinfo));
 
     // 主循环现在可以用于其他任务，或者保持空闲
     while (1) {
-        now = time(NULL);
-        localtime_r(&now, &timeinfo);
-        // timeinfo = localtime(&now);
-        ESP_LOGI(TAG, "Current time: %s", asctime(&timeinfo));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

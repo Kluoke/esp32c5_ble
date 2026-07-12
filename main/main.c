@@ -8,6 +8,8 @@
 #include "btn.h"
 #include "ble.h"
 #include "wifi.h"
+#include "ntp.h"
+#include <time.h>
 
 static const char *TAG = "MAIN_APP";
 
@@ -37,6 +39,8 @@ static void led_control_task(void *pvParameters)
 
 void app_main(void)
 {
+    time_t now;
+    struct tm timeinfo;
     // 1. 初始化底层驱动和 NVS
     nvs_flash_init();
     led_init();
@@ -52,6 +56,7 @@ void app_main(void)
     // 3. 初始化需要通信机制的模块
     wifi_init(); // 初始化 Wi-Fi 模块
     ble_init(led_cmd_queue); // 初始化 NimBLE，并传入队列句柄
+    ntp_init(); // 初始化 NTP 模块
 
     // 4. 创建并启动应用逻辑任务
     xTaskCreate(led_control_task, "led_control_task", 2048, NULL, 5, NULL);
@@ -63,6 +68,10 @@ void app_main(void)
 
     // 主循环现在可以用于其他任务，或者保持空闲
     while (1) {
+        now = time(NULL);
+        localtime_r(&now, &timeinfo);
+        // timeinfo = localtime(&now);
+        ESP_LOGI(TAG, "Current time: %s", asctime(&timeinfo));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

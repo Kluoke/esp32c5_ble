@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES ble led wifi btn nvs_flash
+    REQUIRES nvs_flash ble led wifi btn ntp
 )

@@ -13,6 +13,7 @@
 #include "led.h"
 #include "wifi.h"
 #include "mqtt.h"
+#include "ota.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -32,6 +33,9 @@ static uint16_t mqtt_broker_value_handle;
 static uint16_t wifi_scan_cmd_value_handle;
 static uint16_t wifi_scan_result_value_handle;
 static uint16_t wifi_status_value_handle;
+static uint16_t ota_cmd_value_handle;
+static uint16_t ota_data_value_handle;
+static uint16_t ota_status_value_handle;
 static bool wifi_scan_in_progress;
 
 static char wifi_ssid_buf[33] = {0};
@@ -62,6 +66,40 @@ static void ble_notify_string(uint16_t value_handle, const char *value)
 static void ble_notify_wifi_status(const char *status)
 {
     ble_notify_string(wifi_status_value_handle, status);
+}
+
+static void ble_notify_ota_status(const char *status)
+{
+    ble_notify_string(ota_status_value_handle, status);
+}
+
+static void ble_ota_status_callback(ota_state_t state, uint8_t progress)
+{
+    char status_msg[32];
+    switch (state) {
+        case OTA_STATE_IDLE:
+            snprintf(status_msg, sizeof(status_msg), "idle");
+            break;
+        case OTA_STATE_RECEIVING:
+            snprintf(status_msg, sizeof(status_msg), "receiving,%u", progress);
+            break;
+        case OTA_STATE_VALIDATING:
+            snprintf(status_msg, sizeof(status_msg), "validating");
+            break;
+        case OTA_STATE_UPDATING:
+            snprintf(status_msg, sizeof(status_msg), "updating");
+            break;
+        case OTA_STATE_SUCCESS:
+            snprintf(status_msg, sizeof(status_msg), "success");
+            break;
+        case OTA_STATE_ERROR:
+            snprintf(status_msg, sizeof(status_msg), "error");
+            break;
+        default:
+            snprintf(status_msg, sizeof(status_msg), "unknown");
+            break;
+    }
+    ble_notify_ota_status(status_msg);
 }
 
 static void ble_notify_wifi_scan_result(const wifi_scan_result_t *result)
@@ -156,6 +194,77 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
                     }
                 }
             }
+        } else if (attr_handle == ota_cmd_value_handle) {
+            struct os_mbuf *om = ctxt->om;
+            uint16_t len = OS_MBUF_PKTLEN(om);
+            if (len >= 4) {
+                char command[16] = {0};
+                os_mbuf_copydata(om, 0, len, command);
+                
+                // BEGIN 命令：开始 OTA 升级
+                if (strncmp(command, "BEGIN", 5) == 0) {
+                    // 提取固件大小参数：BEGIN,size_in_bytes
+                    char *size_str = strstr(command, ",");
+                    if (size_str) {
+                        uint32_t firmware_size = atol(size_str + 1);
+                        ESP_LOGI(TAG, "OTA BEGIN: 固件大小 %u 字节", firmware_size);
+                        esp_err_t err = ota_begin(firmware_size);
+                        if (err == ESP_OK) {
+                            ble_notify_ota_status("begin_ok");
+                        } else {
+                            ble_notify_ota_status("begin_fail");
+                        }
+                    }
+                }
+                // END 命令：结束 OTA 升级
+                else if (strncmp(command, "END", 3) == 0) {
+                    ESP_LOGI(TAG, "OTA END: 结束升级");
+                    esp_err_t err = ota_end();
+                    if (err == ESP_OK) {
+                        ble_notify_ota_status("end_ok");
+                    } else {
+                        ble_notify_ota_status("end_fail");
+                    }
+                }
+                // ABORT 命令：中止 OTA 升级
+                else if (strncmp(command, "ABORT", 5) == 0) {
+                    ESP_LOGI(TAG, "OTA ABORT: 中止升级");
+                    ota_abort();
+                    ble_notify_ota_status("aborted");
+                }
+                // REBOOT 命令：重启设备
+                else if (strncmp(command, "REBOOT", 6) == 0) {
+                    ESP_LOGI(TAG, "OTA REBOOT: 重启设备");
+                    ble_notify_ota_status("rebooting");
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    ota_restart();
+                }
+                // QUERY 命令：查询 OTA 状态
+                else if (strncmp(command, "QUERY", 5) == 0) {
+                    ota_state_t state = ota_get_state();
+                    uint8_t progress = ota_get_progress();
+                    ble_ota_status_callback(state, progress);
+                }
+            }
+        } else if (attr_handle == ota_data_value_handle) {
+            struct os_mbuf *om = ctxt->om;
+            uint16_t len = OS_MBUF_PKTLEN(om);
+            if (len > 0) {
+                uint8_t *data = malloc(len);
+                if (data) {
+                    os_mbuf_copydata(om, 0, len, data);
+                    ESP_LOGD(TAG, "OTA DATA: 接收到 %u 字节", len);
+                    esp_err_t err = ota_write(data, len);
+                    free(data);
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "OTA 写入失败: %s", esp_err_to_name(err));
+                        ble_notify_ota_status("write_fail");
+                    }
+                } else {
+                    ESP_LOGE(TAG, "无法分配内存接收 OTA 数据");
+                    ble_notify_ota_status("mem_fail");
+                }
+            }
         }
         ESP_LOGI(TAG, "Received write to handle %d", attr_handle);
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
@@ -248,6 +357,23 @@ struct ble_gatt_svc_def gatt_svcs[] = {
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &wifi_status_value_handle,
             },
+            {
+                .uuid = BLE_UUID16_DECLARE(0xFF09),
+                .access_cb = gatt_event_handeler,
+                .flags = BLE_GATT_CHR_F_WRITE,
+                .val_handle = &ota_cmd_value_handle,
+            },
+            {
+                .uuid = BLE_UUID16_DECLARE(0xFF0A),
+                .access_cb = gatt_event_handeler,
+                .flags = BLE_GATT_CHR_F_WRITE,
+                .val_handle = &ota_data_value_handle,
+            },
+            {
+                .uuid = BLE_UUID16_DECLARE(0xFF0B),
+                .flags = BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &ota_status_value_handle,
+            },
             {0}
         },
     },
@@ -310,6 +436,11 @@ void ble_init(QueueHandle_t cmd_queue)
     ble_gatts_add_svcs(gatt_svcs);
 
     wifi_set_status_callback(ble_notify_wifi_status);
+    
+    // 初始化 OTA 模块并设置回调
+    ota_init();
+    ota_set_status_callback(ble_ota_status_callback);
+
     ble_hs_cfg.sync_cb = ble_on_sync;
 
     nimble_port_freertos_init(host_task);
@@ -319,4 +450,9 @@ void ble_notify_led_state(uint8_t state)
 {
     const char *response = state == 0 ? "LED is OFF" : "LED is ON";
     ble_notify_string(tx_value_handle, response);
+}
+
+void ble_set_ota_callback(ota_status_callback_t callback)
+{
+    ota_set_status_callback(callback);
 }

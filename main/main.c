@@ -10,6 +10,7 @@
 #include "wifi.h"
 #include "ntp.h"
 #include "mqtt.h"
+#include "ota.h"
 #include <time.h>
 
 static const char *TAG = "MAIN_APP";
@@ -67,7 +68,12 @@ void app_main(void)
     // 5. 设置初始状态并打印日志
     led_set_random_color(); // 启动时设置一个随机颜色
     ESP_LOGI(TAG, "All components initialized. Application running.");
-    ESP_LOGI(TAG, "Press BOOT button to toggle LED"); now = time(NULL);
+    ESP_LOGI(TAG, "Press BOOT button to toggle LED");
+    
+    // 打印当前运行的分区信息
+    ESP_LOGI(TAG, "Running from partition: %s", ota_get_current_partition());
+    
+    now = time(NULL);
     localtime_r(&now, &timeinfo);
     // timeinfo = localtime(&now);
     ESP_LOGI(TAG, "Current time: %s", asctime(&timeinfo));

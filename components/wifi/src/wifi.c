@@ -4,6 +4,7 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "WIFI";
@@ -17,24 +18,41 @@ static int s_retry_num = 0;
 
 static esp_event_handler_instance_t instance_any_id;
 static esp_event_handler_instance_t instance_got_ip;
+static wifi_status_callback_t s_status_callback;
+
+static void wifi_report_status(const char *status)
+{
+    if (s_status_callback != NULL) {
+        s_status_callback(status);
+    }
+}
+
+void wifi_set_status_callback(wifi_status_callback_t callback)
+{
+    s_status_callback = callback;
+}
 
 void wifi_event_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data){
     if(event_base == WIFI_EVENT){
         switch(event_id){
             case WIFI_EVENT_STA_START:
                 esp_wifi_connect();
+                wifi_report_status("connecting");
                 ESP_LOGI(TAG, "开始连接");
                 break;
             case WIFI_EVENT_STA_CONNECTED:
                 s_retry_num = 0;
+                wifi_report_status("connected");
                 ESP_LOGI(TAG, "连接成功");
                 break;
             case WIFI_EVENT_STA_DISCONNECTED:
                 if (s_retry_num < MAX_RETRY) {
                     esp_wifi_connect();
                     s_retry_num++;
+                    wifi_report_status("retrying");
                     ESP_LOGW(TAG, "断开连接，重连中... 第 %d 次", s_retry_num);
                 } else {
+                    wifi_report_status("failed");
                     ESP_LOGE(TAG, "达到最大重连次数，停止重连");
                 }
                 break;
@@ -69,12 +87,55 @@ bool wifi_is_provisioned(void)
     return (err == ESP_OK && ssid_len > 0);
 }
 
+esp_err_t wifi_scan_networks(wifi_scan_result_t *results, uint16_t *count)
+{
+    if (results == NULL || count == NULL || *count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint16_t capacity = *count > WIFI_SCAN_MAX_APS ? WIFI_SCAN_MAX_APS : *count;
+    wifi_scan_config_t scan_config = {
+        .show_hidden = true,
+    };
+
+    ESP_LOGI(TAG, "开始扫描附近 Wi-Fi");
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi 扫描失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint16_t ap_count = 0;
+    err = esp_wifi_scan_get_ap_num(&ap_count);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint16_t result_count = ap_count < capacity ? ap_count : capacity;
+    wifi_ap_record_t ap_records[WIFI_SCAN_MAX_APS] = {0};
+    err = esp_wifi_scan_get_ap_records(&result_count, ap_records);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    for (uint16_t i = 0; i < result_count; ++i) {
+        strlcpy(results[i].ssid, (const char *)ap_records[i].ssid, sizeof(results[i].ssid));
+        results[i].rssi = ap_records[i].rssi;
+        results[i].authmode = ap_records[i].authmode;
+    }
+
+    *count = result_count;
+    ESP_LOGI(TAG, "Wi-Fi 扫描完成，找到 %u 个网络", result_count);
+    return ESP_OK;
+}
+
 void wifi_save_credentials_and_connect(const char *ssid, const char *password)
 {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "打开 NVS 失败: %s", esp_err_to_name(err));
+        wifi_report_status("failed");
         return;
     }
 

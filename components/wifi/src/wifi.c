@@ -18,18 +18,22 @@ static int s_retry_num = 0;
 
 static esp_event_handler_instance_t instance_any_id;
 static esp_event_handler_instance_t instance_got_ip;
-static wifi_status_callback_t s_status_callback;
 
+/**
+ * @brief 通过事件循环上报 Wi-Fi 状态字符串。
+ *
+ * 将字符串按值拷贝投递到默认事件循环，监听者（如 BLE）可直接读取。
+ *
+ * @note 本函数可能在默认事件循环任务上下文中被调用（wifi_event_handler），
+ *       因此使用非阻塞方式投递，避免队列满时死锁。
+ */
 static void wifi_report_status(const char *status)
 {
-    if (s_status_callback != NULL) {
-        s_status_callback(status);
+    esp_err_t err = esp_event_post(APP_EVENT, APP_EVENT_WIFI_STATUS,
+                                   status, strlen(status) + 1, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi 状态事件投递失败: %s (%s)", esp_err_to_name(err), status);
     }
-}
-
-void wifi_set_status_callback(wifi_status_callback_t callback)
-{
-    s_status_callback = callback;
 }
 
 void wifi_event_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data){
@@ -87,7 +91,7 @@ bool wifi_is_provisioned(void)
     return (err == ESP_OK && ssid_len > 0);
 }
 
-esp_err_t wifi_scan_networks(wifi_scan_result_t *results, uint16_t *count)
+esp_err_t wifi_scan_networks(app_wifi_scan_result_t *results, uint16_t *count)
 {
     if (results == NULL || count == NULL || *count == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -163,7 +167,7 @@ void wifi_save_credentials_and_connect(const char *ssid, const char *password)
 void wifi_init(void)
 {
     esp_netif_init();
-    esp_event_loop_create_default();
+    /* 默认事件循环由 app_events_init() 统一创建，此处不再重复创建 */
 
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);

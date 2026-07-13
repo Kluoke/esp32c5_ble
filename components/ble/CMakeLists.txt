@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "src/ble.c"
     INCLUDE_DIRS "include"
-    REQUIRES bt led wifi mqtt_app
+    REQUIRES bt app_events
 )

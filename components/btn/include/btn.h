@@ -1,20 +1,23 @@
 #ifndef BTN_H
 #define BTN_H
 
-#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /**
- * @brief LED 状态变化的回调函数类型。
- * 
- * @param state 新的 LED 状态 (0x00 for OFF, 0x01 for ON)。
+ * @brief 初始化按键模块。
+ *
+ * btn 模块只负责按键 GPIO 采集与防抖。
+ * 检测到有效按下后，通过 APP_EVENT 事件循环抛出 APP_EVENT_BTN_PRESSED 事件，
+ * 由 app_controller 决定如何响应（控制 LED、上报状态等）。
+ *
+ * 不再依赖 ble.h / led.h。
  */
-typedef void (*led_state_change_callback_t)(uint8_t state);
+void button_init(void);
 
-/**
- * @brief 初始化按键，并注册一个状态变化回调函数。
- * 
- * @param cb 当 LED 状态因按键发生变化时要调用的回调函数。
- */
-void button_init(led_state_change_callback_t cb);
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BTN_H

@@ -1,23 +1,26 @@
 #ifndef BLE_H
 #define BLE_H
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /**
  * @brief 初始化蓝牙模块。
- * 
- * @param cmd_queue 一个已经创建好的、用于传递命令的消息队列句柄。
- *                  蓝牙模块将作为此队列的生产者。
+ *
+ * BLE 模块作为“黑盒”：
+ * - 仅负责蓝牙协议栈、GATT 收发与广播。
+ * - 收到 App 下发的数据时，通过 APP_EVENT 事件循环抛出
+ *   APP_EVENT_BLE_* 事件，由 app_controller 处理。
+ * - 监听 APP_EVENT_*(_STATUS / _SCAN_RESULT / LED_STATE_CHANGED) 事件，
+ *   将业务模块的状态通过 GATT Notify 上报给 App。
+ *
+ * 不再依赖 led/wifi/mqtt/ota 等业务模块的头文件。
  */
-void ble_init(QueueHandle_t cmd_queue);
+void ble_init(void);
 
-/**
- * @brief 通过蓝牙GATT通知上报LED状态。
- * 
- * @param state 要上报的状态 (0x00 for OFF, 0x01 for ON)。
- */
-void ble_notify_led_state(uint8_t state);
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BLE_H

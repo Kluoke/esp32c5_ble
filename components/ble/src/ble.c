@@ -1,4 +1,5 @@
 #include "ble.h"
+#include "app_events.h"
 #include "esp_log.h"
 #include "host/ble_att.h"
 #include "host/ble_hs.h"
@@ -8,20 +9,14 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
-#include "led.h"
-#include "wifi.h"
-#include "mqtt.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define TAG "BLE_MODULE"
 #define DEVICE_NAME "ESP32_BLE_DEVICE"
 #define BLE_PREFERRED_MTU 128
-#define WIFI_SCAN_TASK_STACK_SIZE 8192
-
-static QueueHandle_t led_cmd_queue;
 
 static uint16_t g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t rx_value_handle;
@@ -32,13 +27,17 @@ static uint16_t mqtt_broker_value_handle;
 static uint16_t wifi_scan_cmd_value_handle;
 static uint16_t wifi_scan_result_value_handle;
 static uint16_t wifi_status_value_handle;
-static bool wifi_scan_in_progress;
+static uint16_t ota_cmd_value_handle;
+static uint16_t ota_data_value_handle;
+static uint16_t ota_status_value_handle;
 
+/* BLE 内部缓存：用于组装多段写入的配网信息（属于 BLE 自身状态） */
 static char wifi_ssid_buf[33] = {0};
 static char wifi_pwd_buf[65] = {0};
-static char mqtt_broker_buf[129] = {0};
 
 void start_advertising(void);
+
+/* ---------- GATT Notify 辅助函数 ---------- */
 
 static void ble_notify_string(uint16_t value_handle, const char *value)
 {
@@ -64,7 +63,12 @@ static void ble_notify_wifi_status(const char *status)
     ble_notify_string(wifi_status_value_handle, status);
 }
 
-static void ble_notify_wifi_scan_result(const wifi_scan_result_t *result)
+static void ble_notify_ota_status(const char *status)
+{
+    ble_notify_string(ota_status_value_handle, status);
+}
+
+static void ble_notify_wifi_scan_result(const app_wifi_scan_result_t *result)
 {
     char payload[64];
     int len = snprintf(payload, sizeof(payload), "%s,%d,%u",
@@ -77,26 +81,81 @@ static void ble_notify_wifi_scan_result(const wifi_scan_result_t *result)
     ble_notify_string(wifi_scan_result_value_handle, payload);
 }
 
-static void wifi_scan_task(void *arg)
+static void ble_notify_led_state(uint8_t state)
 {
-    wifi_scan_result_t results[WIFI_SCAN_MAX_APS] = {0};
-    uint16_t count = WIFI_SCAN_MAX_APS;
+    const char *response = state == 0 ? "LED is OFF" : "LED is ON";
+    ble_notify_string(tx_value_handle, response);
+}
 
-    ble_notify_wifi_status("scanning");
-    esp_err_t err = wifi_scan_networks(results, &count);
-    if (err != ESP_OK) {
-        ble_notify_wifi_status("scan_failed");
-    } else {
-        for (uint16_t i = 0; i < count; ++i) {
-            ble_notify_wifi_scan_result(&results[i]);
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        ble_notify_wifi_status("scan_done");
+/* ---------- OTA 状态 -> 字符串（监听 APP_EVENT_OTA_STATUS 后调用）---------- */
+
+static void ble_report_ota_status(app_ota_state_t state, uint8_t progress)
+{
+    char status_msg[32];
+    switch (state) {
+        case APP_OTA_STATE_IDLE:
+            snprintf(status_msg, sizeof(status_msg), "idle");
+            break;
+        case APP_OTA_STATE_RECEIVING:
+            snprintf(status_msg, sizeof(status_msg), "receiving,%u", progress);
+            break;
+        case APP_OTA_STATE_VALIDATING:
+            snprintf(status_msg, sizeof(status_msg), "validating");
+            break;
+        case APP_OTA_STATE_UPDATING:
+            snprintf(status_msg, sizeof(status_msg), "updating");
+            break;
+        case APP_OTA_STATE_SUCCESS:
+            snprintf(status_msg, sizeof(status_msg), "success");
+            break;
+        case APP_OTA_STATE_ERROR:
+            snprintf(status_msg, sizeof(status_msg), "error");
+            break;
+        default:
+            snprintf(status_msg, sizeof(status_msg), "unknown");
+            break;
+    }
+    ble_notify_ota_status(status_msg);
+}
+
+/* ---------- 出站事件监听（业务模块 -> BLE Notify）---------- */
+
+static void ble_event_handler(void *arg, esp_event_base_t event_base,
+                              int32_t event_id, void *event_data)
+{
+    if (event_base != APP_EVENT) {
+        return;
     }
 
-    wifi_scan_in_progress = false;
-    vTaskDelete(NULL);
+    switch ((app_event_id_t)event_id) {
+        case APP_EVENT_LED_STATE_CHANGED: {
+            uint8_t state = *(uint8_t *)event_data;
+            ble_notify_led_state(state);
+            break;
+        }
+        case APP_EVENT_WIFI_STATUS: {
+            /* event_data 为按值拷贝的状态字符串 */
+            const char *status = (const char *)event_data;
+            ble_notify_wifi_status(status);
+            break;
+        }
+        case APP_EVENT_WIFI_SCAN_RESULT: {
+            app_wifi_scan_result_t *result = (app_wifi_scan_result_t *)event_data;
+            ble_notify_wifi_scan_result(result);
+            break;
+        }
+        case APP_EVENT_OTA_STATUS: {
+            app_ota_status_t *st = (app_ota_status_t *)event_data;
+            ble_report_ota_status(st->state, st->progress);
+            break;
+        }
+        default:
+            /* BLE 入站事件由 app_controller 处理，此处忽略 */
+            break;
+    }
 }
+
+/* ---------- GATT 访问回调（入站数据 -> 抛出事件）---------- */
 
 static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
                                struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -106,9 +165,7 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
             struct os_mbuf *om = ctxt->om;
             if (OS_MBUF_PKTLEN(om) > 0) {
                 uint8_t cmd = om->om_data[0];
-                if (xQueueSend(led_cmd_queue, &cmd, 0) != pdPASS) {
-                    ESP_LOGE(TAG, "Failed to send to led_cmd_queue");
-                }
+                esp_event_post(APP_EVENT, APP_EVENT_BLE_LED_CMD, &cmd, sizeof(cmd), 0);
             }
         } else if (attr_handle == wifi_ssid_value_handle) {
             struct os_mbuf *om = ctxt->om;
@@ -125,16 +182,23 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
                 os_mbuf_copydata(om, 0, len, wifi_pwd_buf);
                 wifi_pwd_buf[len] = '\0';
                 ESP_LOGI(TAG, "收到 WiFi Password，开始配网");
-                wifi_save_credentials_and_connect(wifi_ssid_buf, wifi_pwd_buf);
+                app_wifi_credentials_t creds;
+                memset(&creds, 0, sizeof(creds));
+                strlcpy(creds.ssid, wifi_ssid_buf, sizeof(creds.ssid));
+                strlcpy(creds.password, wifi_pwd_buf, sizeof(creds.password));
+                esp_event_post(APP_EVENT, APP_EVENT_BLE_WIFI_CREDENTIALS,
+                               &creds, sizeof(creds), 0);
             }
         } else if (attr_handle == mqtt_broker_value_handle) {
             struct os_mbuf *om = ctxt->om;
             uint16_t len = OS_MBUF_PKTLEN(om);
-            if (len > 0 && len < sizeof(mqtt_broker_buf)) {
-                os_mbuf_copydata(om, 0, len, mqtt_broker_buf);
-                mqtt_broker_buf[len] = '\0';
-                ESP_LOGI(TAG, "收到 MQTT 服务器地址: %s，开始连接", mqtt_broker_buf);
-                mqtt_app_save_broker_and_connect(mqtt_broker_buf);
+            if (len > 0 && len < 129) {
+                char broker_buf[129] = {0};
+                os_mbuf_copydata(om, 0, len, broker_buf);
+                broker_buf[len] = '\0';
+                ESP_LOGI(TAG, "收到 MQTT 服务器地址: %s，开始连接", broker_buf);
+                esp_event_post(APP_EVENT, APP_EVENT_BLE_MQTT_BROKER,
+                               broker_buf, strlen(broker_buf) + 1, 0);
             }
         } else if (attr_handle == wifi_scan_cmd_value_handle) {
             char command[5] = {0};
@@ -142,18 +206,57 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
             if (len == 4) {
                 os_mbuf_copydata(ctxt->om, 0, len, command);
                 if (memcmp(command, "SCAN", 4) == 0) {
-                    if (wifi_scan_in_progress) {
-                        ble_notify_wifi_status("scan_busy");
-                    } else {
-                        wifi_scan_in_progress = true;
-                        BaseType_t task_created = xTaskCreate(wifi_scan_task, "wifi_scan",
-                                                               WIFI_SCAN_TASK_STACK_SIZE, NULL, 5, NULL);
-                        if (task_created != pdPASS) {
-                            wifi_scan_in_progress = false;
-                            ble_notify_wifi_status("scan_failed");
-                            ESP_LOGE(TAG, "创建 Wi-Fi 扫描任务失败");
-                        }
+                    esp_event_post(APP_EVENT, APP_EVENT_BLE_WIFI_SCAN_REQUESTED,
+                                   NULL, 0, 0);
+                }
+            }
+        } else if (attr_handle == ota_cmd_value_handle) {
+            struct os_mbuf *om = ctxt->om;
+            uint16_t len = OS_MBUF_PKTLEN(om);
+            if (len >= 4) {
+                char command[16] = {0};
+                os_mbuf_copydata(om, 0, len, command);
+
+                if (strncmp(command, "BEGIN", 5) == 0) {
+                    char *size_str = strstr(command, ",");
+                    if (size_str) {
+                        uint32_t firmware_size = (uint32_t)atol(size_str + 1);
+                        ESP_LOGI(TAG, "OTA BEGIN: 固件大小 %u 字节", firmware_size);
+                        esp_event_post(APP_EVENT, APP_EVENT_BLE_OTA_BEGIN,
+                                       &firmware_size, sizeof(firmware_size), 0);
                     }
+                } else if (strncmp(command, "END", 3) == 0) {
+                    ESP_LOGI(TAG, "OTA END: 结束升级");
+                    esp_event_post(APP_EVENT, APP_EVENT_BLE_OTA_END, NULL, 0, 0);
+                } else if (strncmp(command, "ABORT", 5) == 0) {
+                    ESP_LOGI(TAG, "OTA ABORT: 中止升级");
+                    esp_event_post(APP_EVENT, APP_EVENT_BLE_OTA_ABORT, NULL, 0, 0);
+                } else if (strncmp(command, "REBOOT", 6) == 0) {
+                    ESP_LOGI(TAG, "OTA REBOOT: 重启设备");
+                    ble_notify_ota_status("rebooting");
+                    esp_event_post(APP_EVENT, APP_EVENT_BLE_OTA_REBOOT, NULL, 0, 0);
+                } else if (strncmp(command, "QUERY", 5) == 0) {
+                    esp_event_post(APP_EVENT, APP_EVENT_BLE_OTA_QUERY, NULL, 0, 0);
+                }
+            }
+        } else if (attr_handle == ota_data_value_handle) {
+            struct os_mbuf *om = ctxt->om;
+            uint16_t len = OS_MBUF_PKTLEN(om);
+            if (len > 0) {
+                uint8_t *data = malloc(len);
+                if (data) {
+                    os_mbuf_copydata(om, 0, len, data);
+                    ESP_LOGD(TAG, "OTA DATA: 接收到 %u 字节", len);
+                    app_ota_data_t ota_data = { .data = data, .len = len };
+                    esp_err_t post_err = esp_event_post(APP_EVENT, APP_EVENT_BLE_OTA_DATA,
+                                                        &ota_data, sizeof(ota_data), 0);
+                    if (post_err != ESP_OK) {
+                        ESP_LOGE(TAG, "OTA 数据事件投递失败: %s", esp_err_to_name(post_err));
+                        free(data);
+                    }
+                } else {
+                    ESP_LOGE(TAG, "无法分配内存接收 OTA 数据");
+                    ble_notify_ota_status("mem_fail");
                 }
             }
         }
@@ -248,6 +351,24 @@ struct ble_gatt_svc_def gatt_svcs[] = {
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &wifi_status_value_handle,
             },
+            {
+                .uuid = BLE_UUID16_DECLARE(0xFF09),
+                .access_cb = gatt_event_handeler,
+                .flags = BLE_GATT_CHR_F_WRITE,
+                .val_handle = &ota_cmd_value_handle,
+            },
+            {
+                .uuid = BLE_UUID16_DECLARE(0xFF0A),
+                .access_cb = gatt_event_handeler,
+                .flags = BLE_GATT_CHR_F_WRITE,
+                .val_handle = &ota_data_value_handle,
+            },
+            {
+                .uuid = BLE_UUID16_DECLARE(0xFF0B),
+                .access_cb = gatt_event_handeler,
+                .flags = BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &ota_status_value_handle,
+            },
             {0}
         },
     },
@@ -295,10 +416,8 @@ void host_task(void *arg)
     nimble_port_run();
 }
 
-void ble_init(QueueHandle_t cmd_queue)
+void ble_init(void)
 {
-    led_cmd_queue = cmd_queue;
-
     nimble_port_init();
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -309,14 +428,13 @@ void ble_init(QueueHandle_t cmd_queue)
     ble_gatts_count_cfg(gatt_svcs);
     ble_gatts_add_svcs(gatt_svcs);
 
-    wifi_set_status_callback(ble_notify_wifi_status);
+    /* 监听业务模块抛出的出站通知事件，转换为 GATT Notify 上报给 App */
+    esp_event_handler_register(APP_EVENT, APP_EVENT_LED_STATE_CHANGED, ble_event_handler, NULL);
+    esp_event_handler_register(APP_EVENT, APP_EVENT_WIFI_STATUS, ble_event_handler, NULL);
+    esp_event_handler_register(APP_EVENT, APP_EVENT_WIFI_SCAN_RESULT, ble_event_handler, NULL);
+    esp_event_handler_register(APP_EVENT, APP_EVENT_OTA_STATUS, ble_event_handler, NULL);
+
     ble_hs_cfg.sync_cb = ble_on_sync;
 
     nimble_port_freertos_init(host_task);
-}
-
-void ble_notify_led_state(uint8_t state)
-{
-    const char *response = state == 0 ? "LED is OFF" : "LED is ON";
-    ble_notify_string(tx_value_handle, response);
 }

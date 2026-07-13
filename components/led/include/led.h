@@ -23,9 +23,18 @@ void led_set_random_color(void);
 
 /**
  * @brief 关闭板载 RGB LED
- * 
+ *
  * 清除 LED 状态，使其熄灭。
  */
 void led_turn_off(void);
+
+/**
+ * @brief 设置板载 RGB LED 为指定颜色
+ *
+ * @param red   红色分量 (0-255)
+ * @param green 绿色分量 (0-255)
+ * @param blue  蓝色分量 (0-255)
+ */
+void led_set_color(uint8_t red, uint8_t green, uint8_t blue);
 
 #endif // _LED_H_

@@ -200,7 +200,7 @@ static int gatt_event_handeler(uint16_t conn_handle, uint16_t attr_handle,
             if (len >= 4) {
                 char command[16] = {0};
                 os_mbuf_copydata(om, 0, len, command);
-                
+
                 // BEGIN 命令：开始 OTA 升级
                 if (strncmp(command, "BEGIN", 5) == 0) {
                     // 提取固件大小参数：BEGIN,size_in_bytes
@@ -436,7 +436,7 @@ void ble_init(QueueHandle_t cmd_queue)
     ble_gatts_add_svcs(gatt_svcs);
 
     wifi_set_status_callback(ble_notify_wifi_status);
-    
+
     // 初始化 OTA 模块并设置回调
     ota_init();
     ota_set_status_callback(ble_ota_status_callback);

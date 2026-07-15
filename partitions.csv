@@ -1,8 +1,8 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets.
+# OTA mode: ota_0 and ota_1 as dual app partitions, no factory partition needed
 nvs,      data, nvs,     ,        0x6000,
 phy_init, data, phy,     ,        0x1000,
-factory,  app,  factory, ,        2M,
-ota_0,    app,  ota_0,   ,        2M,
-ota_1,    app,  ota_1,   ,        2M,
-ota_data, data, ota,     ,        0x2000,
+otadata,  data, ota,     ,        0x2000,
+ota_0,    app,  ota_0,   ,        0x1C0000,
+ota_1,    app,  ota_1,   ,        0x1C0000,

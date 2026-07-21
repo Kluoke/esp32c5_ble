@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 1.1 seconds
+Wall time: 1.9 seconds
 Output:
 #include "ble.h"
 #include "ble_protocol.h"
@@ -190,7 +190,10 @@ static int gatt_access(uint16_t conn_handle, uint16_t attr_handle,
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
     const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (attr_handle == command_value_handle) {
-        if (len > RX_BUFFER_SIZE - rx_buffer_len) { rx_buffer_len = 0; return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN; }
+        /* Preserve an incomplete frame on overload.  Completed frames are consumed
+         * first; only the new write is rejected if it still cannot fit. */
+        if (len > RX_BUFFER_SIZE - rx_buffer_len) consume_rx_buffer();
+        if (len > RX_BUFFER_SIZE - rx_buffer_len) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         os_mbuf_copydata(ctxt->om, 0, len, rx_buffer + rx_buffer_len);
         rx_buffer_len += len;
         consume_rx_buffer();
